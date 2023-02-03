@@ -1,0 +1,183 @@
+- hosts: all
+  become: yes
+
+  vars:
+    ansible_remote_tmp: /tmp/
+
+  tasks:
+    - name: update outdated packages
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: yes
+
+    - name: install dependencies
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg-agent
+        - software-properties-common
+        - python3
+        - python3-pip
+
+    - name: add docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: add docker repository to apt
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: install docker
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+
+    - name: check if docker is active
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: ensure group "docker" exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: add ubuntu to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+
+    - name: install docker-compose
+      get_url:
+        url: https://github.com/docker/compose/releases/download/v2.15.1/docker-compose-Linux-x86_64
+        dest: /usr/local/bin/docker-compose
+        mode: 'u+x,g+x'
+
+    - name: change file ownership, group and permissions
+      ansible.builtin.file:
+        path: /usr/local/bin/docker-compose
+        owner: ubuntu
+        group: ubuntu
+
+    - name: install python packages
+      ansible.builtin.pip:
+        name: "{{ item }}"
+      loop:
+      - docker
+      - docker-compose
+
+    # start here if:
+    # - setup already concluded and 
+    # - only docker-compose or configuration files or data files were changed
+
+    - name: create directories
+      file:
+        path: "{{ item }}"
+        mode: 0755
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+      loop:
+      - /home/ubuntu/docker
+      - /home/ubuntu/docker/config
+      - /home/ubuntu/docker/data
+
+    - name: copy configuration files
+      copy:
+        src: docker/config
+        dest: /home/ubuntu/docker
+        mode: 0755
+        owner: ubuntu
+        group: ubuntu
+
+    - name: check if docker compose already exists
+      stat:
+        path: /home/ubuntu/docker/docker-compose.yml
+      register: docker_compose
+
+    - name: docker compose down running compose
+      when: docker_compose.stat.exists
+      community.docker.docker_compose:
+        state: absent
+        project_src: /home/ubuntu/docker
+        files:
+        - docker-compose.yml
+
+    - name: copy loki docker compose
+      when: inventory_hostname in groups["loki"]
+      copy:
+        src: docker/loki.docker-compose.yml
+        dest: /home/ubuntu/docker/docker-compose.yml
+        mode: 0755
+        owner: ubuntu
+        group: ubuntu
+
+    - name: copy logger docker compose
+      when: inventory_hostname in groups["logger"]
+      copy:
+        src: docker/logger.docker-compose.yml
+        dest: /home/ubuntu/docker/docker-compose.yml
+        mode: 0755
+        owner: ubuntu
+        group: ubuntu
+
+    - name: copy storage docker compose
+      when: inventory_hostname in groups["storage"]
+      copy:
+        src: docker/minio.docker-compose.yml
+        dest: /home/ubuntu/docker/docker-compose.yml
+        mode: 0755
+        owner: ubuntu
+        group: ubuntu
+
+    - name: set s3 host in config
+      replace:
+        path: /home/ubuntu/docker/config/loki.yaml
+        regexp: 'ANSIBLE_S3_ENDPOINT'
+        replace: "{{ groups['storage'][0] }}"
+
+    - name: set public ip for consistent hash ring
+      replace:
+        path: /home/ubuntu/docker/config/loki.yaml
+        regexp: 'ANSIBLE_OWN_PUBLIC_IP'
+        replace: "{{ ansible_default_ipv4['address'] }}"
+
+    - name: set loki gateway in config
+      replace:
+        path: /home/ubuntu/docker/config/promtail.yaml
+        regexp: 'ANSIBLE_LOKI_GATEWAY'
+        replace: "{{ groups['loki'][0] }}"
+
+    - name: set own name in promtail
+      replace:
+        path: /home/ubuntu/docker/config/promtail.yaml
+        regexp: 'ANSIBLE_HOST_NAME'
+        replace: "{{ ansible_hostname }}"
+
+    - name: docker compose up backend services
+      when: inventory_hostname in groups["storage"]
+      community.docker.docker_compose:
+        project_src: /home/ubuntu/docker
+        files:
+        - docker-compose.yml
+
+    - name: docker compose up loki
+      when: inventory_hostname not in groups["storage"]
+      community.docker.docker_compose:
+        project_src: /home/ubuntu/docker
+        files:
+        - docker-compose.yml

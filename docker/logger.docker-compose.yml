@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  log-generator:
+    image: mingrammer/flog
+    command:
+      - --loop
+      - --format=json
+      - --number=10
+      - --delay=1000ms
+      - --output=/var/log/generated-logs.txt
+      - --overwrite
+      - --type=log
+    volumes:
+      - ./loki/:/var/log/
+
+  promtail:
+    image:  grafana/promtail:2.6.1
+    container_name: promtail
+    volumes:
+      - ./config/promtail.yaml:/etc/promtail/promtail.yaml
+      - ./loki/:/var/log/
+      - ./data:/etc/promtail/data
+    command: -config.file=/etc/promtail/promtail.yaml
+    networks:
+      - lokidemo
+
+  loki-distributor:
+    image: grafana/loki:2.6.1
+    container_name: loki-distributor
+    ports:
+      # host:container
+      - 3101:3100
+    volumes:
+      - ./config:/etc/loki/
+    command: -config.file=/etc/loki/loki.yaml -target=distributor
+    networks:
+      - lokidemo
+
+  loki-ingester:
+    image: grafana/loki:2.6.1
+    container_name: loki-ingester
+    ports:
+      - 3100
+      - "9095:9095"
+    volumes:
+      - ./config:/etc/loki/
+    command: -config.file=/etc/loki/loki.yaml -target=ingester
+    networks:
+      - lokidemo
+
+networks:
+  lokidemo: 
+    name: lokidemo
+
